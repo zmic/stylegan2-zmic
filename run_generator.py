@@ -19,6 +19,7 @@ import pickle
 import time
 import glob
 import os
+import itertools
 
 import pretrained_networks
 
@@ -89,8 +90,40 @@ def regenerate_folder(network_pkl, input_dir):
         fn = os.path.splitext(os.path.basename(f))[0] + '-b.png'
         save_with_metadata(im, fn, metadata, False)
             
+def vary_folder(network_pkl, input_dir, q, count):
+    files = glob.glob(input_dir + "/*.png")
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    noise_vars = [var for name, var in Gs.components.synthesis.vars.items() if name.startswith('noise')]
+
+    Gs_kwargs = dnnlib.EasyDict()
+    Gs_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8, nchw_to_nhwc=True)
+    Gs_kwargs.randomize_noise = False
+    
+    for f in files:
+        metadata = read_metadata(f)
+        z = metadata['z']
+        truncation_psi = metadata['truncation_psi']
+        noise_seed = metadata['noise_seed']
+        rnd = np.random.RandomState(noise_seed)
+        vars = {var: rnd.randn(*var.shape.as_list()) for var in noise_vars}        
+        tflib.set_vars(vars) # [height, width]           
+        for i in range(count):
+            truncation_psi2 = truncation_psi + np.random.randn()/q/10
+            if truncation_psi2 < 0.3:
+                truncation_psi2 = 0.3
+            elif truncation_psi2 > 1:
+                truncation_psi2 = 1
+            Gs_kwargs.truncation_psi = truncation_psi2       
+            z2 = (z + np.random.randn(*z.shape)/q) / (1 + 1/(q*q))       
+            images = Gs.run(z2, None, **Gs_kwargs) # [minibatch, height, width, channel]            
+            im = PIL.Image.fromarray(images[0], 'RGB')  #.save(dnnlib.make_run_dir_path('varysingle_%04d.png' % i))
+            fn = '-vf.png'
+            metadata = {'z':z2, 'truncation_psi':truncation_psi2, 'noise_seed':noise_seed}            
+            save_with_metadata(im, fn, metadata, True)
             
-def vary_seeds(network_pkl, seeds, truncation_psi, save_noise, q):
+            
+def vary_seeds(network_pkl, seeds, psi0, psi1, save_noise, q, count):
     print('Loading networks from "%s"...' % network_pkl)
     _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
     #noise_vars = [var for name, var in Gs.components.synthesis.vars.items() if name.startswith('noise')]
@@ -99,8 +132,8 @@ def vary_seeds(network_pkl, seeds, truncation_psi, save_noise, q):
     Gs_kwargs = dnnlib.EasyDict()
     Gs_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8, nchw_to_nhwc=True)
     Gs_kwargs.randomize_noise = False
-    if truncation_psi is not None:
-        Gs_kwargs.truncation_psi = truncation_psi
+    #if truncation_psi is not None:
+    #    Gs_kwargs.truncation_psi = truncation_psi
 
     for seed_idx, seed in enumerate(seeds):
         print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
@@ -110,11 +143,13 @@ def vary_seeds(network_pkl, seeds, truncation_psi, save_noise, q):
         noise_seed = rnd.randint(0,1000000)
         rnd_noise = np.random.RandomState(noise_seed)
         vars = {var: rnd_noise.randn(*var.shape.as_list()) for name, var in noise_vars_dict.items()}
-        for i in range (10):
+        for i in range (count):
+            truncation_psi = psi0 + (psi1-psi0)*np.random.random()
+            Gs_kwargs.truncation_psi = truncation_psi
             tflib.set_vars(vars) # [height, width]           
             images = Gs.run(z2, None, **Gs_kwargs) # [minibatch, height, width, channel]            
             im = PIL.Image.fromarray(images[0], 'RGB')  #.save(dnnlib.make_run_dir_path('varysingle_%04d.png' % i))
-            fn = 'vary_single_%04d.png'%i
+            fn = 'vary_seed_%08d.png'%seed
             metadata = {'z':z2, 'truncation_psi':truncation_psi}            
             if save_noise:
                 metadata_noise_vars = { name : vars[var] for name, var in noise_vars_dict.items()}
@@ -122,8 +157,50 @@ def vary_seeds(network_pkl, seeds, truncation_psi, save_noise, q):
             else:
                 metadata['noise_seed'] = noise_seed
             save_with_metadata(im, fn, metadata, True)            
-            z2 = (z + rnd.randn(*z.shape)/q) / (1 + 1/(q*q))            
-            
+            z2 = (z + np.random.randn(*z.shape)/q) / (1 + 1/(q*q))            
+          
+def interpolate_seeds(network_pkl, seeds, psi0, psi1, count, first_against_all):
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    noise_vars = [var for name, var in Gs.components.synthesis.vars.items() if name.startswith('noise')]
+
+    Gs_kwargs = dnnlib.EasyDict()
+    Gs_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8, nchw_to_nhwc=True)
+    Gs_kwargs.randomize_noise = False
+
+    L = []
+    for seed in seeds:
+        rnd = np.random.RandomState(seed)
+        z = rnd.randn(1, *Gs.input_shape[1:]) # [minibatch, component]        
+        L.append((seed, z))
+        #noise_seed = rnd.randint(0,1000000)
+        #rnd_noise = np.random.RandomState(noise_seed)
+        #vars = {var: rnd_noise.randn(*var.shape.as_list()) for var in noise_vars}        
+        #L.append((seed, z, noise_seed, vars))
+        
+    if first_against_all:
+        it = itertools.product([L[0]],L[1:])
+    else:
+        it = itertools.combinations(L, 2)
+        
+    for x, y in it:  
+        truncation_psi = psi0 + (psi1-psi0)*np.random.random()
+        Gs_kwargs.truncation_psi = truncation_psi        
+        for i in range(count):
+            noise_seed = rnd.randint(0,1000000)
+            rnd_noise = np.random.RandomState(noise_seed)
+            vars = {var: rnd_noise.randn(*var.shape.as_list()) for var in noise_vars}        
+        
+            r = (i+1)/(count+1)
+            #r = random.random()
+            z = (1-r)*x[1] + r*y[1]
+            tflib.set_vars(vars) # [height, width]           
+            images = Gs.run(z, None, **Gs_kwargs) # [minibatch, height, width, channel]
+            im = PIL.Image.fromarray(images[0], 'RGB')  #.save(dnnlib.make_run_dir_path('varysingle_%04d.png' % i))            
+            fn = '{:010d}-{:010d}-{:03d}.png'.format(x[0], y[0], int(r*1000))
+            metadata = {'z':z, 'truncation_psi':truncation_psi, 'noise_seed':noise_seed}            
+            save_with_metadata(im, fn, metadata, True)               
+        
 def generate_images(network_pkl, seeds, truncation_psi):
     print('Loading networks from "%s"...' % network_pkl)
     _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
@@ -284,10 +361,29 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
     parser_vary_seeds = subparsers.add_parser('vary-seeds', help='Generate images')
     parser_vary_seeds.add_argument('--network', help='Network pickle filename', dest='network_pkl', default=default_pkl)
     parser_vary_seeds.add_argument('--seeds', type=_parse_num_range, help='List of random seeds', required=True)
-    parser_vary_seeds.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_vary_seeds.add_argument('--psi0', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_vary_seeds.add_argument('--psi1', type=float, help='Truncation psi (default: %(default)s)', default=0.55)
+    parser_vary_seeds.add_argument('--count', type=int, default=20)
     parser_vary_seeds.add_argument('--q', type=float, help='', default=5)
     parser_vary_seeds.add_argument('--save-noise', default=False)
     parser_vary_seeds.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
+
+    parser_vary_folder = subparsers.add_parser('vary-folder', help='Generate images')
+    parser_vary_folder.add_argument('--network', help='Network pickle filename', dest='network_pkl', default=default_pkl)
+    parser_vary_folder.add_argument('--input-dir', help='Input folder', required=True)    
+    parser_vary_folder.add_argument('--count', type=int, default=20)
+    parser_vary_folder.add_argument('--q', type=float, help='', default=5)
+    parser_vary_folder.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
+    
+    parser_interpolate_seeds = subparsers.add_parser('interpolate-seeds', help='Generate images')
+    parser_interpolate_seeds.add_argument('--network', help='Network pickle filename', dest='network_pkl', default=default_pkl)
+    parser_interpolate_seeds.add_argument('--seeds', type=_parse_num_range, help='List of random seeds', required=True)
+    parser_interpolate_seeds.add_argument('--psi0', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_interpolate_seeds.add_argument('--psi1', type=float, help='Truncation psi (default: %(default)s)', default=0.55)
+    parser_interpolate_seeds.add_argument('--count', type=int, default=20)
+    parser_interpolate_seeds.add_argument('--first-against-all', type=int, default=0)
+    parser_interpolate_seeds.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
+
 
     parser_style_mixing_example = subparsers.add_parser('style-mixing-example', help='Generate style mixing video')
     parser_style_mixing_example.add_argument('--network', help='Network pickle filename', dest='network_pkl', default=default_pkl)
@@ -315,6 +411,8 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
     func_name_map = {
         'generate-images': 'run_generator.generate_images',
         'vary-seeds': 'run_generator.vary_seeds',
+        'vary-folder': 'run_generator.vary_folder',        
+        'interpolate-seeds': 'run_generator.interpolate_seeds',
         'regenerate-folder': 'run_generator.regenerate_folder',
         'style-mixing-example': 'run_generator.style_mixing_example'
     }
