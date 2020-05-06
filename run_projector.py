@@ -4,6 +4,10 @@
 # To view a copy of this license, visit
 # https://nvlabs.github.io/stylegan2/license.html
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+
 import argparse
 import numpy as np
 import dnnlib
@@ -15,6 +19,7 @@ import projector
 import pretrained_networks
 from training import dataset
 from training import misc
+
 
 #----------------------------------------------------------------------------
 
