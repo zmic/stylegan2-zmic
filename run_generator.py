@@ -73,6 +73,7 @@ def regenerate_folder(network_pkl, input_dir):
     
     for f in files:
         metadata = read_metadata(f)
+        print(metadata.keys())
         z = metadata['z']
         truncation_psi = metadata['truncation_psi']
         if 'noise_vars' in metadata:
@@ -86,7 +87,7 @@ def regenerate_folder(network_pkl, input_dir):
         images = Gs.run(z, None, **Gs_kwargs) # [minibatch, height, width, channel]            
         im = PIL.Image.fromarray(images[0], 'RGB')  #.save(dnnlib.make_run_dir_path('varysingle_%04d.png' % i))
         fn = os.path.splitext(os.path.basename(f))[0] + '-b.png'
-        save_with_metadata(im, fn, {'z':z, 'truncation_psi':truncation_psi}, False)
+        save_with_metadata(im, fn, metadata, False)
             
             
 def vary_seeds(network_pkl, seeds, truncation_psi, save_noise, q):
@@ -120,10 +121,8 @@ def vary_seeds(network_pkl, seeds, truncation_psi, save_noise, q):
                 metadata['noise_vars'] = metadata_noise_vars
             else:
                 metadata['noise_seed'] = noise_seed
-            save_with_metadata(im, fn, metadata, False)            
-            #q = 5
-            z2 = (z + rnd.randn(*z.shape)/q) / (1 + 1/(q*q))
-            
+            save_with_metadata(im, fn, metadata, True)            
+            z2 = (z + rnd.randn(*z.shape)/q) / (1 + 1/(q*q))            
             
 def generate_images(network_pkl, seeds, truncation_psi):
     print('Loading networks from "%s"...' % network_pkl)
